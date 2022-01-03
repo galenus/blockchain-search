@@ -1,15 +1,5 @@
 import { AVERAGE_BLOCK_DURATION, GENESIS_BLOCK_TIMESTAMP } from "./constants";
-import { Block, BlockchainAccessor, Nullable, PromiseOfNullable } from "./types";
-
-interface Approximation {
-    block: Nullable<Block>;
-    height: number;
-}
-
-interface ApproximationBrackets {
-    bottom: Approximation;
-    top: Approximation;
-}
+import { Block, BlockchainAccessor, PromiseOfNullable } from "./types";
 
 export default class BlockchainCrawler {
     readonly #blockchainAccessor: BlockchainAccessor;
@@ -19,72 +9,9 @@ export default class BlockchainCrawler {
         this.#blockchainAccessor = blockchainAccessor;
     }
 
-    #findBlock = async (height: number, currentBlock: Nullable<Block>): Promise<Approximation> => {
-        if (currentBlock?.height === height) return { block: currentBlock, height };
-
-        return {
-            block: await this.#blockchainAccessor.getBlockAtHeight(height),
-            height,
-        };
-    }
-
-    #approximateBlockRecursively = async (
-        timestamp: number,
-        {  bottom, top }: ApproximationBrackets,
-    ): PromiseOfNullable<number> => {
-        if ((top.block?.time ?? 0) >= timestamp
-            && (bottom.block?.time ?? 0) < timestamp
-            && top.height - bottom.height <= 1) {
-            return bottom.height;
-        }
-
-        if (!top.block) {
-            return this.#approximateBlockRecursively(
-                timestamp,
-                {
-                    bottom,
-                    top: await this.#findBlock(bottom.block!.height + Math.ceil((top.height - bottom.height) / 2), null),
-                }
-            );
-        }
-
-        if (!bottom.block) {
-            return this.#approximateBlockRecursively(
-                timestamp,
-                {
-                    bottom: await this.#findBlock(top.block!.height - Math.ceil((top.height - bottom.height) / 2), null),
-                    top,
-                }
-            );
-        }
-
-        if (top.block.time < timestamp) {
-            return this.#approximateBlockRecursively(
-                timestamp,
-                {
-                    bottom: top,
-                    top: await this.#findBlock(top.block.height + Math.ceil((timestamp - top.block.time) / AVERAGE_BLOCK_DURATION), top.block),
-                },
-            )
-        }
-
-        if (bottom.block.time > timestamp) {
-            return this.#approximateBlockRecursively(
-                timestamp,
-                {
-                    bottom: await this.#findBlock(bottom.block.height - Math.ceil((bottom.block.time - timestamp) / AVERAGE_BLOCK_DURATION), bottom.block),
-                    top: bottom,
-                },
-            )
-        }
-
-        return this.#approximateBlockRecursively(
-            timestamp,
-            {
-                bottom: await this.#findBlock(bottom.height + Math.floor((timestamp - bottom.block.time) / AVERAGE_BLOCK_DURATION), bottom.block),
-                top: await this.#findBlock(top.height - Math.floor((top.block.time - timestamp) / AVERAGE_BLOCK_DURATION), top.block),
-            }
-        );
+    #findBlockAtHeight = async (height: number): Promise<Block> => {
+        const block = await this.#blockchainAccessor.getBlockAtHeight(height);
+        return block!;
     }
 
     #approximateBlock = async (timestamp: number, lastBlock: Block) => {
@@ -94,14 +21,43 @@ export default class BlockchainCrawler {
             return lastBlock.height;
         }
 
-        return this.#approximateBlockRecursively(timestamp, {
-            bottom: initialApproximationBlock.time >= timestamp
-                ? await this.#findBlock(initialApproximationBlock.height - Math.ceil((initialApproximationBlock.time - timestamp) / AVERAGE_BLOCK_DURATION), null)
-                : { block: initialApproximationBlock, height: expectedBlockHeight },
-            top: initialApproximationBlock.time >= timestamp
-                ? { block: initialApproximationBlock, height: expectedBlockHeight }
-                : await this.#findBlock(initialApproximationBlock.height + Math.ceil((timestamp - initialApproximationBlock.time) / AVERAGE_BLOCK_DURATION), null),
-        });
+        let previousBlock = lastBlock;
+        let currentBlock = initialApproximationBlock;
+
+        let approximationCount = 0;
+        while (
+            Math.abs(previousBlock.height - currentBlock.height) > 1
+            || currentBlock.time < timestamp && previousBlock.time < timestamp
+        ) {
+            let heightDelta = Math.floor((timestamp - currentBlock.time) / AVERAGE_BLOCK_DURATION);
+            if (heightDelta === 0) {
+                heightDelta = 1;
+            }
+
+            let nextHeight = currentBlock.height + heightDelta;
+
+            if (heightDelta > 0
+                && previousBlock.height > currentBlock.height
+                && nextHeight >= previousBlock.height
+            ) {
+                nextHeight = previousBlock.height - 1;
+            }
+
+            if (heightDelta < 0
+                && currentBlock.height > previousBlock.height
+                && nextHeight <= previousBlock.height
+            ) {
+                nextHeight = previousBlock.height + 1;
+            }
+
+            previousBlock = currentBlock;
+            currentBlock = await this.#findBlockAtHeight(nextHeight);
+            approximationCount++;
+
+            console.log(`Approximation #${approximationCount}; current block: {height=${currentBlock.height}, time=${currentBlock.time}}; previous block: {height=${previousBlock.height}, time=${previousBlock.time}}`);
+        }
+
+        return previousBlock.height > currentBlock.height ? currentBlock.height : previousBlock.height;
     }
 
     findLastBlockHeightBefore = async (timestamp: number): PromiseOfNullable<number> => {
